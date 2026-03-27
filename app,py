@@ -1,0 +1,101 @@
+import streamlit as st
+import pandas as pd
+import requests
+from supabase import create_client, Client
+from requests_oauthlib import OAuth2Session
+from pyvis.network import Network
+import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
+
+# --- 🛰️ CREDENTIALS CHECK ---
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+    CLIENT_ID = st.secrets["CLIENT_ID"]
+    SECRET_KEY = st.secrets["SECRET_KEY"]
+except Exception:
+    st.error("🛑 CONFIGURATION MISSING: Go to Streamlit Settings > Secrets and add your keys.")
+    st.stop()
+
+# Initialize Supabase
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- 🛡️ THE REDIRECT FIX ---
+# This MUST match the URL in your browser and the EVE Portal exactly.
+CALLBACK_URL = "https://zalvarians-tactical-ex8pp9wvn8kvnhn3t2qf8p.streamlit.app/"
+TARGET_ALLIANCE_ID = 99014405 
+
+# --- UI SETUP ---
+st.set_page_config(page_title="Zalvarians Command", layout="wide", page_icon="🛡️")
+
+if "token" not in st.session_state:
+    st.title("🛡️ ZALVARIANS ALLIANCE LOGIN")
+    
+    # Create the OAuth Session
+    esi = OAuth2Session(CLIENT_ID, redirect_uri=CALLBACK_URL, scope=["esi-location.read_location.v1"])
+    login_url, _ = esi.authorization_url("https://login.eveonline.com/v2/oauth/authorize")
+    
+    st.info(f"Checking Redirect URI: `{CALLBACK_URL}`")
+    
+    st.markdown(f'''
+        <a href="{login_url}" target="_self">
+            <button style="padding:20px; background:#b30000; color:white; border:none; border-radius:5px; cursor:pointer; width:300px; font-weight:bold;">
+                LOGIN TO TACTICAL MAP
+            </button>
+        </a>
+    ''', unsafe_allow_html=True)
+    
+    # Handle the Callback
+    if "code" in st.query_params:
+        try:
+            token = esi.fetch_token("https://login.eveonline.com/v2/oauth/token", code=st.query_params["code"], client_secret=SECRET_KEY)
+            res = requests.get("https://login.eveonline.com/v2/oauth/verify", headers={"Authorization": f"Bearer {token['access_token']}"})
+            char_data = res.json()
+            
+            # Alliance Check
+            detail = requests.get(f"https://esi.evetech.net/latest/characters/{char_data['CharacterID']}/").json()
+            if detail.get('alliance_id') == TARGET_ALLIANCE_ID:
+                st.session_state.token = token
+                st.session_state.char_info = char_data
+                st.rerun()
+            else:
+                st.error(f"Unauthorized: Character belongs to Alliance {detail.get('alliance_id')}")
+        except Exception as e:
+            st.error(f"Authentication Failed: {str(e)}")
+
+else:
+    # --- LOGGED IN VIEW ---
+    st_autorefresh(interval=15000, key="esi_ping")
+    char_name = st.session_state.char_info['CharacterName']
+    
+    st.sidebar.title(f"Pilot: {char_name}")
+    
+    # Simple Map Logic (Same as before)
+    maps_resp = supabase.table("maps").select("*").execute()
+    maps_df = pd.DataFrame(maps_resp.data)
+    if maps_df.empty:
+        supabase.table("maps").insert({"name": "Main Chain"}).execute()
+        st.rerun()
+    
+    selected_map = st.sidebar.selectbox("Active Map:", maps_df['name'])
+    curr_map_id = int(maps_df[maps_df['name'] == selected_map]['id'].iloc[0])
+
+    # Show Map
+    sys_resp = supabase.table("systems").select("*").eq("map_id", curr_map_id).execute()
+    link_resp = supabase.table("links").select("*").eq("map_id", curr_map_id).execute()
+    n_df = pd.DataFrame(sys_resp.data)
+    
+    st.title(f"🛰️ ALLIANCE OVERLAY: {selected_map}")
+    
+    if not n_df.empty:
+        net = Network(height="700px", width="100%", bgcolor="#0b0d11", font_color="white")
+        for _, r in n_df.iterrows():
+            net.add_node(str(r['id']), label=r['name'], color="#444444")
+        net.save_graph("temp.html")
+        components.html(open("temp.html", 'r').read(), height=710)
+    else:
+        st.warning("No systems logged on this map yet.")
+
+    if st.sidebar.button("🚪 Logout"):
+        del st.session_state.token
+        st.rerun()
