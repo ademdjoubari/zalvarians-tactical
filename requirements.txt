@@ -1,0 +1,7 @@
+streamlit
+pandas
+requests
+requests_oauthlib
+pyvis
+supabase
+streamlit-autorefresh
